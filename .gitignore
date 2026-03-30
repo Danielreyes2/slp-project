@@ -1,4 +1,9 @@
+__pycache__
 pyrightconfig.json
 .venv
 .python-version
 checkpoint.pt
+face_landmarker.task
+AFTERNOON.mp4
+crops.png
+AFTERNOON-roi.mp4

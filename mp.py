@@ -90,3 +90,12 @@ def resample_to_25fps(crops, source_fps=30, target_fps=25):
     resampled = np.array([crops[int(round(i))] for i in source_indices])
     print(f"Resampled: {n_source} frames @ {source_fps:.0f}fps -> {len(resampled)} frames @ {target_fps}fps")
     return resampled
+
+def save_crops_as_video(crops, output_path, fps=25):
+    h, w = crops[0].shape
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (w, h), isColor=False)
+    for frame in crops:
+        out.write(frame)
+    out.release()
+    print(f"Saved {len(crops)} frames to {output_path}")

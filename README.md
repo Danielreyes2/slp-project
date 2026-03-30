@@ -31,7 +31,22 @@ Downgrade numpy version to avoid problems with type aliases, https://numpy.org/d
 pip install "numpy<1.24"
 ```
 
-Download the pretrained model: AV-HuBERT Base, LRS3 + VoxCeleb2 (EN), no finetuning
+Download the model: Noise-Augmented AV-HuBERT Large, LRS3 + VoxCeleb2 (EN), LRS3-422h
 ```
-wget -O checkpoint.pt https://dl.fbaipublicfiles.com/avhubert/model/lrs3_vox/clean-pretrain/base_vox_iter5.pt
+wget -O checkpoint.pt https://dl.fbaipublicfiles.com/avhubert/model/lrs3_vox/avsr/large_noise_pt_noise_ft_433h.pt
+```
+
+Install mediapipe
+```
+pip install mediapipe==0.10.5
+```
+
+Downgrade opencv-python
+```
+pip install opencv-python==4.8.0.76
+```
+
+Download the example video from Oxford-BBC LRW website
+```
+wget -O AFTERNOON.mp4 https://www.robots.ox.ac.uk/~vgg/data/lip_reading/data/AFTERNOON.mp4
 ```
