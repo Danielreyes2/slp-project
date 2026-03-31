@@ -17,6 +17,18 @@ from mp import process_video, save_crops_as_video, plot_crops
 
 from model_utils import predict
 
+import logging
+import warnings
+
+# Remove noisy warnings
+warnings.filterwarnings("ignore")
+
+# Remove noisy logs
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("hubert_pretraining").setLevel(logging.WARNING)
+logging.getLogger("hubert").setLevel(logging.WARNING)
+logging.getLogger("hubert_dataset").setLevel(logging.WARNING)
+
 # Load AV Hubert model
 ckpt_path = "checkpoint.pt"
 models, cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task([ckpt_path])
