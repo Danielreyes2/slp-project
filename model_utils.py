@@ -4,7 +4,11 @@ from fairseq import tasks, utils
 from fairseq.dataclass.configs import GenerationConfig
 from omegaconf import OmegaConf
 
-def predict(video_path, model, cfg, task):
+import hubert_pretraining, hubert, hubert_asr # type: ignore
+
+import torch
+
+def prep_inference(video_path, model, cfg, task):
     num_frames = int(cv2.VideoCapture(video_path).get(cv2.CAP_PROP_FRAME_COUNT))
     data_dir = tempfile.mkdtemp()
     tsv_cont = ["/\n", f"test-0\t{video_path}\t{None}\t{num_frames}\t{int(16_000*num_frames/25)}\n"]
@@ -27,17 +31,33 @@ def predict(video_path, model, cfg, task):
     task.load_dataset(gen_subset, task_cfg=cfg.task)
     generator = task.build_generator([model], gen_cfg)
 
-    def decode_fn(x):
+    def hypo_token_decoder(x):
         dictionary = task.target_dictionary
         symbols_ignore = generator.symbols_to_strip_from_output
         symbols_ignore.add(dictionary.pad())
         return task.datasets[gen_subset].label_processors[0].decode(x, symbols_ignore)
 
     itr = task.get_batch_iterator(dataset=task.dataset(gen_subset)).next_epoch_itr(shuffle=False)
+    return itr, generator, hypo_token_decoder
+
+def predict(model, task, itr, generator, hypo_token_decoder):
     sample = next(itr)
     hypos = task.inference_step(generator, [model], sample)
-    print(hypos[0][0].keys())
     hypo_tokens = hypos[0][0]['tokens'].int().cpu()
     hypo_scores = hypos[0][0]['score']
-    hypo_text = decode_fn(hypo_tokens)
+    hypo_text = hypo_token_decoder(hypo_tokens)
     return hypo_text, hypo_tokens, hypo_scores
+
+def run_inference_and_extract_soft_targets(model, itr, temperature=1.0):
+    model.num_updates = 999999
+
+    with torch.no_grad():
+        sample = next(itr)
+
+        net_output = model(**sample['net_input'])
+
+        logits = net_output[0]
+
+        return torch.softmax(logits / temperature, dim=-1)
+
+
