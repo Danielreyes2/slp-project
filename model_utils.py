@@ -9,6 +9,17 @@ import hubert_pretraining, hubert, hubert_asr # type: ignore
 import torch
 import numpy as np
 
+# Re-export preprocessing so existing `from model_utils import crops_to_tensor`
+# call sites keep working. The actual implementation lives in preprocessing.py
+# which has no fairseq dependency (so tests can import it standalone).
+from preprocessing import (  # noqa: F401
+    AVHUBERT_CROP_SIZE,
+    AVHUBERT_IMAGE_MEAN,
+    AVHUBERT_IMAGE_STD,
+    _center_crop,
+    crops_to_tensor,
+)
+
 def prep_inference(video_path, model, cfg, task):
     num_frames = int(cv2.VideoCapture(video_path).get(cv2.CAP_PROP_FRAME_COUNT))
     data_dir = tempfile.mkdtemp()
@@ -61,9 +72,3 @@ def run_inference_and_extract_soft_targets(model, itr, temperature=1.0):
 
         return torch.softmax(logits / temperature, dim=-1)
 
-def crops_to_tensor(crops):
-    frames = crops.astype(np.float32) / 255.0
-    frames = (frames - 0.421) / 0.165
-    
-    tensor = torch.FloatTensor(frames).unsqueeze(0).unsqueeze(2)
-    return tensor
