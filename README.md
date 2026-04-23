@@ -1,6 +1,17 @@
+## Environments
+
+Two supported environments — they use **different pins** on purpose.
+
+- **Canonical training env: Colab (Python 3.12).** See `test_pipeline.ipynb`. Training runs here on A100. Pins: `numpy>=1.24,<1.27`, `omegaconf>=2.0,<2.4`, `hydra-core>=1.0,<1.4`, default `mediapipe` / `opencv-python` wheels. Includes a fairseq mutable-default monkeypatch required on Py 3.12.
+- **Local dev env (Python 3.8).** Sebastian's setup, documented below. Intentionally older pins that actually install cleanly on a Mac against editable fairseq. Do not train here — smoke-test only.
+
+If you change pins in one env, check the other still works. Do not silently unify them without a reason.
+
+## Local dev setup (Python 3.8)
+
 Clone this repo
 ```
-git clone https://github.com/seblini/slp-project.git
+git clone https://github.com/Danielreyes2/slp-project.git
 cd slp-project
 ```
 

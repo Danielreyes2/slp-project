@@ -56,14 +56,32 @@ itr, generator, hypo_token_decoder  = prep_inference(os.path.abspath("AFTERNOON-
 # Run inference and extract soft targets
 soft_targets = run_inference_and_extract_soft_targets(model, itr)
 
-VOCAB_SIZE = 1000
-PAD_IDX = 1
-BOS_IDX = 0
+# Derive dimensions from real teacher output
+print(f"\nTeacher soft targets shape: {soft_targets.shape}")
+VOCAB_SIZE = soft_targets.size(-1)
+SEQ_LEN = soft_targets.size(1)
 BATCH_SIZE = 1
-NUM_FRAMES = 29
-SEQ_LEN = 5
 
-# Initialize student model
+# Get special token indices from teacher's dictionary
+target_dict = task.target_dictionary
+PAD_IDX = target_dict.pad()
+BOS_IDX = target_dict.eos()  # fairseq uses EOS token as BOS for decoder input
+print(f"Vocab size: {VOCAB_SIZE}, Seq len: {SEQ_LEN}, PAD: {PAD_IDX}, BOS: {BOS_IDX}")
+
+# Derive hard targets from teacher's best predictions
+hard_targets = soft_targets.argmax(dim=-1)  # (1, SEQ_LEN)
+
+# Construct prev_tokens: [BOS, tok_0, tok_1, ...] (shifted right for teacher forcing)
+prev_tokens = torch.cat([
+    torch.full((BATCH_SIZE, 1), BOS_IDX, dtype=torch.long),
+    hard_targets[:, :-1],
+], dim=1)
+
+# Prepare video frames from real crops
+video_frames = crops_to_tensor(crops)
+print(f"Video frames shape: {video_frames.shape}")
+
+# Initialize student model with teacher's vocab size
 student = StudentLipReader(
     vocab_size=VOCAB_SIZE,
     embed_dim=256,
@@ -77,16 +95,9 @@ student = StudentLipReader(
 print()
 student.print_parameter_breakdown()
 
-# Prepare training data
-video_frames = crops_to_tensor(crops)
-prev_tokens = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, SEQ_LEN))
-prev_tokens[:, 0] = BOS_IDX
-hard_targets = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, SEQ_LEN))
-teacher_soft_targets = torch.softmax(torch.randn(BATCH_SIZE, SEQ_LEN, VOCAB_SIZE), dim=-1)
-
-# Run training step
+# Run training step with real teacher soft targets
 trainer = DistillationTrainer(student, temperature=2.0, alpha=0.7)
-losses = trainer.train_step(video_frames, prev_tokens, teacher_soft_targets, hard_targets)
+losses = trainer.train_step(video_frames, prev_tokens, soft_targets, hard_targets)
 
 print(f"\nCombined loss: {losses['loss']:.4f}")
 print(f"Soft loss:     {losses['soft_loss']:.4f}")
