@@ -56,7 +56,10 @@ pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
 step "av_hubert + fairseq install"
 cd "$AVH_DIR"
 git submodule init && git submodule update
-pip install -r requirements.txt --no-deps
+# Skip av_hubert's requirements.txt — its pinned opencv-python==4.5.4.60 has no
+# wheel for our Python and tries to build from source, which needs numpy 1.21
+# (incompatible with anything beyond 3.10). We install the deps it actually
+# needs in the "Preprocessing deps" step below with permissive versions.
 cd "$AVH_DIR/fairseq"
 pip install --editable ./ --no-deps
 pip install "omegaconf==2.0.6" "hydra-core==1.0.7" --force-reinstall
@@ -83,7 +86,12 @@ fi
 
 step "Preprocessing deps"
 pip install scikit-video opencv-python decord h5py tqdm python_speech_features
-pip install "face-alignment==1.3.5" --force-reinstall
+# --no-deps is critical: face-alignment 1.3.5 has loose torch constraints and
+# without --no-deps pip will rip out our torch 2.7.1+cu128 and replace it with
+# a fresh latest-torch + cuda-toolkit-13 chain. Install its actual runtime deps
+# (scikit-image, numba) explicitly afterward.
+pip install "face-alignment==1.3.5" --no-deps --force-reinstall
+pip install scikit-image numba
 
 step "Mean face + teacher checkpoint"
 mkdir -p "$DATA_BASE/misc" "$DATA_BASE/checkpoints" \
