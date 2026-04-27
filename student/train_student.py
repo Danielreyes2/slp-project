@@ -59,13 +59,17 @@ def kd_loss(student_logits, teacher_logits, teacher_tokens, decoder_mask,
     kd_term = kl.sum() / (~decoder_mask).float().sum().clamp(min=1.0)
     kd_term = kd_term * (temperature ** 2)  # standard KD scaling
     
-    # Hard target loss (CE against teacher's greedy tokens)
-    ce = F.cross_entropy(
+    # Hard target loss (CE against teacher's greedy tokens). decoder_mask is the
+    # only correct mask: collate_fn zero-pads teacher_tokens, but pad_id from the
+    # fairseq dict is typically 1 (not 0), so ignore_index=pad_id would mask
+    # nothing and BOS would be supervised at every padded position.
+    ce_per_pos = F.cross_entropy(
         student_logits.reshape(-1, student_logits.shape[-1]),
         teacher_tokens.reshape(-1),
-        ignore_index=pad_id,
-        reduction='mean',
-    )
+        reduction='none',
+    ).reshape(student_logits.shape[:2])
+    ce_valid = (~decoder_mask).float()
+    ce = (ce_per_pos * ce_valid).sum() / ce_valid.sum().clamp(min=1.0)
     
     return alpha * kd_term + (1 - alpha) * ce, kd_term.item(), ce.item()
 
@@ -94,13 +98,16 @@ def eval_kl(model, loader, special, device, temperature=1.0):
         student_logits = model(video, video_mask, prev_tokens,
                                decoder_mask=decoder_mask)
         
+        # True KL (was previously CE, off by H(t) which doesn't affect argmin
+        # but inflates the printed value). Correct formula: Σ t·(log t − log s).
         s_log = F.log_softmax(student_logits / temperature, dim=-1)
         t_soft = F.softmax(teacher_logits / temperature, dim=-1)
-        kl_per_tok = -(t_soft * s_log).sum(dim=-1)  # (B, T_d)
+        t_log = F.log_softmax(teacher_logits / temperature, dim=-1)
+        kl_per_tok = (t_soft * (t_log - s_log)).sum(dim=-1)  # (B, T_d)
         valid = (~decoder_mask).float()
         total_kl += (kl_per_tok * valid).sum().item()
         total_tokens += valid.sum().item()
-    
+
     return total_kl / max(total_tokens, 1)
 
 

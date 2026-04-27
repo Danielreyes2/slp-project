@@ -23,7 +23,7 @@ d = task.target_dictionary
 # Load student
 ckpt = torch.load('runs/student_v1/best.pt', map_location='cuda', weights_only=False)
 student = VideoStudent(
-    vocab_size=1000,
+    vocab_size=len(d),
     pad_id=d.pad(), bos_id=d.bos(), eos_id=d.eos(),
 ).cuda().eval()
 student.load_state_dict(ckpt['model'])
