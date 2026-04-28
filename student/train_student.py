@@ -136,6 +136,10 @@ def main():
     ap.add_argument('--dim', type=int, default=256)
     ap.add_argument('--enc_layers', type=int, default=4)
     ap.add_argument('--dec_layers', type=int, default=4)
+    ap.add_argument('--early_stopping_patience', type=int, default=3,
+                    help='Stop if val_kl does not improve for this many epochs.')
+    ap.add_argument('--early_stopping_min_delta', type=float, default=1e-3,
+                    help='Minimum val_kl improvement to count as a real improvement.')
     args = ap.parse_args()
     
     os.makedirs(args.out_dir, exist_ok=True)
@@ -192,6 +196,7 @@ def main():
     scaler = torch.cuda.amp.GradScaler()
     
     best_val_kl = float('inf')
+    epochs_since_improvement = 0
     for epoch in range(args.epochs):
         model.train()
         t0 = time.time()
@@ -257,10 +262,17 @@ def main():
             'args': vars(args),
         }
         torch.save(ckpt, os.path.join(args.out_dir, 'last.pt'))
-        if val_kl < best_val_kl:
+        if val_kl < best_val_kl - args.early_stopping_min_delta:
             best_val_kl = val_kl
+            epochs_since_improvement = 0
             torch.save(ckpt, os.path.join(args.out_dir, 'best.pt'))
             print(f"  → new best val_kl={val_kl:.3f}, saved best.pt")
+        else:
+            epochs_since_improvement += 1
+            print(f"  → no improvement ({epochs_since_improvement}/{args.early_stopping_patience} since best={best_val_kl:.3f})")
+            if epochs_since_improvement >= args.early_stopping_patience:
+                print(f"Early stopping at epoch {epoch+1}: val_kl plateaued for {args.early_stopping_patience} epochs.")
+                break
 
 
 if __name__ == '__main__':
