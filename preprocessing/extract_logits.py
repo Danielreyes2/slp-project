@@ -11,8 +11,12 @@ from python_speech_features import logfbank
 
 # Path setup for AV-HuBERT
 AVHUBERT_PARENT = (Path(__file__).parent / "../av_hubert").resolve()
+AVHUBERT_DIR = AVHUBERT_PARENT / "avhubert"
 FAIRSEQ_PATH = (Path(__file__).parent / "../av_hubert/fairseq").resolve()
+# AVHUBERT_DIR also on sys.path so avhubert/hubert.py's bare
+# `from hubert_pretraining import ...` resolves (it's a sibling file, not relative).
 sys.path.insert(0, str(AVHUBERT_PARENT))
+sys.path.insert(0, str(AVHUBERT_DIR))
 sys.path.insert(0, str(FAIRSEQ_PATH))
 
 import fairseq  # type: ignore
