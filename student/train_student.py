@@ -9,19 +9,20 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-AVHUBERT_PARENT = (Path(__file__).parent / "../av_hubert").resolve()
-AVHUBERT_DIR = AVHUBERT_PARENT / "avhubert"
+AVHUBERT_DIR = (Path(__file__).parent / "../av_hubert/avhubert").resolve()
 FAIRSEQ_PATH = (Path(__file__).parent / "../av_hubert/fairseq").resolve()
-# AVHUBERT_DIR also on sys.path so avhubert/hubert.py's bare
-# `from hubert_pretraining import ...` resolves (it's a sibling file, not relative).
-sys.path.insert(0, str(AVHUBERT_PARENT))
+# Match sanity.py exactly: only AVHUBERT_DIR and FAIRSEQ_PATH on sys.path,
+# bare imports. Adding the parent /av_hubert/ AND the inner /av_hubert/avhubert/
+# both to sys.path makes Python import hubert_pretraining twice (once as
+# `avhubert.hubert_pretraining` via the package, once as bare top-level), and
+# the second registration trips fairseq's `Cannot register duplicate model`.
 sys.path.insert(0, str(AVHUBERT_DIR))
 sys.path.insert(0, str(FAIRSEQ_PATH))
 
 import fairseq  # type: ignore
-from avhubert import hubert_pretraining  # type: ignore  # noqa
-from avhubert import hubert  # type: ignore  # noqa
-from avhubert import hubert_asr  # type: ignore  # noqa
+import hubert_pretraining  # type: ignore  # noqa
+import hubert  # type: ignore  # noqa
+import hubert_asr  # type: ignore  # noqa
 
 from student_dataset import (
     LRWDistillationDataset, collate_fn, split_clip_ids_by_lrw_split,
