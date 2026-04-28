@@ -134,7 +134,10 @@ def teacher_forced_metrics(model, loader, special, device, temperature):
 
 @torch.no_grad()
 def greedy_autoregressive_metrics(model, dataset, special, device, max_decode_len,
-                                  tgt_dict, label_word, batch_size):
+                                  tgt_dict, batch_size, per_clip_records=None):
+    """If per_clip_records is a list, per-clip records are appended for downstream
+    analysis (e.g. viseme bucketing). Each record has clip_id, target_word, the
+    decoded teacher/student texts, and boolean correctness flags."""
     model.eval()
     eos = special['eos_id']
 
@@ -146,15 +149,16 @@ def greedy_autoregressive_metrics(model, dataset, special, device, max_decode_le
     n_clips = 0
     n_string_match = 0
     sum_token_overlap = 0.0
-    n_teacher_correct = 0
-
-    label_norm = (label_word or '').lower().strip()
+    n_teacher_word_correct = 0
+    n_student_word_correct = 0
 
     for batch in loader:
         video = batch['video'].to(device, non_blocking=True)
         video_mask = batch['video_mask'].to(device, non_blocking=True)
         teacher_tokens = batch['teacher_tokens']
         decoder_lens = batch['decoder_lens']
+        clip_ids = batch['clip_ids']
+        target_words = batch['target_words']
 
         with torch.cuda.amp.autocast(dtype=torch.float16):
             student_tokens_padded = model.greedy_decode(
@@ -178,24 +182,48 @@ def greedy_autoregressive_metrics(model, dataset, special, device, max_decode_le
                 if denom > 0:
                     sum_token_overlap += inter / denom
 
-            if label_norm:
-                t_text = tgt_dict.string(t_seq).replace('▁', ' ').strip().lower()
-                if label_norm in t_text:
-                    n_teacher_correct += 1
+            # Word-accuracy: did the target word appear in the decoded transcript?
+            # AV-HuBERT outputs sentencepiece subwords with ▁ word-boundary markers;
+            # after replacing ▁ with space, words may also be split into subword pieces
+            # separated by spaces (e.g. "mi n ist er" for "minister"). We strip ALL
+            # spaces and substring-match against the lowercased target.
+            t_text = tgt_dict.string(t_seq).replace('▁', ' ').strip().lower()
+            s_text = tgt_dict.string(s_seq).replace('▁', ' ').strip().lower()
+            target_compact = target_words[i].lower().strip().replace(' ', '')
+            t_compact = t_text.replace(' ', '')
+            s_compact = s_text.replace(' ', '')
+            t_correct = bool(target_compact) and target_compact in t_compact
+            s_correct = bool(target_compact) and target_compact in s_compact
+            if t_correct:
+                n_teacher_word_correct += 1
+            if s_correct:
+                n_student_word_correct += 1
+
+            if per_clip_records is not None:
+                per_clip_records.append({
+                    'clip_id': clip_ids[i],
+                    'target_word': target_words[i],
+                    'teacher_text': t_text,
+                    'student_text': s_text,
+                    'teacher_correct': t_correct,
+                    'student_correct': s_correct,
+                })
 
     if n_clips == 0:
         return {
             'n_clips': 0,
             'greedy_string_match': float('nan'),
             'greedy_token_overlap': float('nan'),
-            'teacher_label_correct_rate': float('nan'),
+            'teacher_word_accuracy': float('nan'),
+            'student_word_accuracy': float('nan'),
         }
 
     return {
         'n_clips': n_clips,
         'greedy_string_match': n_string_match / n_clips,
         'greedy_token_overlap': sum_token_overlap / n_clips,
-        'teacher_label_correct_rate': (n_teacher_correct / n_clips) if label_norm else float('nan'),
+        'teacher_word_accuracy': n_teacher_word_correct / n_clips,
+        'student_word_accuracy': n_student_word_correct / n_clips,
     }
 
 
@@ -228,7 +256,6 @@ def format_report(report):
         f"  logits:  {report['logits']}",
         f"  split:   {report['split']}",
         f"  T:       {report['temperature']}",
-        f"  label:   {report['label_word']!r}",
         "",
         f"Teacher-forced  ({tf['n_clips']} clips, {tf['n_valid_positions']} valid positions)",
         f"  ce_per_token       = {tf['ce_per_token']:.4f}",
@@ -237,9 +264,10 @@ def format_report(report):
         f"  top5_jaccard       = {tf['top5_jaccard']:.4f}",
         "",
         f"Greedy autoregressive  ({g['n_clips']} clips)",
-        f"  greedy_string_match        = {g['greedy_string_match']:.4f}",
-        f"  greedy_token_overlap       = {g['greedy_token_overlap']:.4f}",
-        f"  teacher_label_correct_rate = {g['teacher_label_correct_rate']:.4f}",
+        f"  greedy_string_match    = {g['greedy_string_match']:.4f}",
+        f"  greedy_token_overlap   = {g['greedy_token_overlap']:.4f}",
+        f"  teacher_word_accuracy  = {g['teacher_word_accuracy']:.4f}",
+        f"  student_word_accuracy  = {g['student_word_accuracy']:.4f}",
     ]
     return '\n'.join(lines)
 
@@ -258,6 +286,8 @@ def main():
     ap.add_argument('--num_workers', type=int, default=2)
     ap.add_argument('--output', default=None,
                     help='If set, write JSON report. Stdout always gets the human table.')
+    ap.add_argument('--per_clip_output', default=None,
+                    help='If set, write per-clip records to JSONL for downstream analysis (e.g. viseme_analysis.py).')
     ap.add_argument('--limit', type=int, default=None,
                     help='Optional: only evaluate first N clips of the split (smoke test).')
     args = ap.parse_args()
@@ -313,8 +343,6 @@ def main():
     print(f"  {args.split}: {len(split_ids)} clips")
 
     eval_set = LRWDistillationDataset(args.videos, args.logits, clip_ids=split_ids)
-    label_word = derive_label_word(eval_set.clip_ids)
-    print(f"  derived label word: {label_word!r}")
 
     tf_loader = DataLoader(
         eval_set, batch_size=args.batch_size, shuffle=False,
@@ -326,12 +354,13 @@ def main():
     )
 
     print("Running greedy autoregressive metrics...")
+    per_clip_records = [] if args.per_clip_output else None
     greedy_metrics = greedy_autoregressive_metrics(
         model, eval_set, special, device,
         max_decode_len=args.max_decode_len,
         tgt_dict=tgt_dict,
-        label_word=label_word,
         batch_size=min(8, args.batch_size),
+        per_clip_records=per_clip_records,
     )
 
     report = {
@@ -340,7 +369,6 @@ def main():
         'logits': args.logits,
         'split': args.split,
         'temperature': args.temperature,
-        'label_word': label_word,
         'teacher_forced': tf_metrics,
         'greedy': greedy_metrics,
     }
@@ -355,6 +383,15 @@ def main():
         with open(args.output, 'w') as f:
             json.dump(report, f, indent=2)
         print(f"\nWrote {args.output}")
+
+    if args.per_clip_output and per_clip_records is not None:
+        out_dir = os.path.dirname(os.path.abspath(args.per_clip_output))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(args.per_clip_output, 'w') as f:
+            for rec in per_clip_records:
+                f.write(json.dumps(rec) + '\n')
+        print(f"Wrote {len(per_clip_records)} per-clip records to {args.per_clip_output}")
 
 
 if __name__ == '__main__':
