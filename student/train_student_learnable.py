@@ -302,6 +302,13 @@ def main():
             scaler.update()
             scheduler.step()
 
+            # Hard-clamp log_temps to prevent the collapse failure mode where
+            # the model drives temperatures toward 0 (or ∞), gaming the KD loss
+            # and producing distributions that mismatch the fixed eval-T=2.0.
+            # Allowed range: T ∈ [0.5, 8.0], so log_temps ∈ [-0.69, 2.08].
+            with torch.no_grad():
+                log_temps.data.clamp_(math.log(0.5), math.log(8.0))
+
             running_loss += loss.item()
             running_kd += kd_val
             running_ce += ce_val
