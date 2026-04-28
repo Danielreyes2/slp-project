@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import time
 import sys
@@ -45,27 +46,39 @@ def get_special_token_ids(ckpt_path):
 
 
 def kd_loss(student_logits, teacher_logits, teacher_tokens, decoder_mask,
-            temperature=2.0, alpha=0.5, pad_id=1):
-    """
-    Combined distillation loss:
-      KD term: KL(student || teacher) at temperature T
-      CE term: cross-entropy on teacher's greedy tokens (hard targets)
-      total = alpha * KD + (1 - alpha) * CE
+            temperature, alpha=0.5, pad_id=1):
+    """Combined distillation loss.
+
+    `temperature` is either:
+      - a Python float (uniform across all clips), or
+      - a tensor of shape (B,) with a per-clip temperature (the learnable
+        viseme-conditioned setting). Each clip's temperature applies to every
+        decoder position in that clip; the per-clip T² scaling is averaged in
+        with the same masking as the rest of the loss.
     """
     # student_logits, teacher_logits: (B, T_d, V)
     # teacher_tokens: (B, T_d)
     # decoder_mask: (B, T_d), True = padded
-    
-    valid = (~decoder_mask).float().unsqueeze(-1)  # (B, T_d, 1)
-    
-    # Soft target loss (KL with temperature)
-    s_log = F.log_softmax(student_logits / temperature, dim=-1)
-    t_soft = F.softmax(teacher_logits / temperature, dim=-1)
-    kl = -(t_soft * s_log).sum(dim=-1)  # (B, T_d)
-    kl = kl * (~decoder_mask).float()
-    kd_term = kl.sum() / (~decoder_mask).float().sum().clamp(min=1.0)
-    kd_term = kd_term * (temperature ** 2)  # standard KD scaling
-    
+
+    if isinstance(temperature, torch.Tensor):
+        # Broadcast to (B, 1, 1) for division against (B, T_d, V).
+        T_div = temperature.view(-1, 1, 1)
+        T_sq = (temperature ** 2).view(-1, 1)  # (B, 1) for per-position scaling
+    else:
+        T_div = temperature
+        T_sq = float(temperature) ** 2  # plain scalar
+
+    # Soft target KD loss (true KL: Σ t · (log t − log s)).
+    s_log = F.log_softmax(student_logits / T_div, dim=-1)
+    t_soft = F.softmax(teacher_logits / T_div, dim=-1)
+    t_log = F.log_softmax(teacher_logits / T_div, dim=-1)
+    kl_per_pos = (t_soft * (t_log - s_log)).sum(dim=-1)  # (B, T_d)
+    valid_mask = (~decoder_mask).float()  # (B, T_d)
+    # Per-clip T² scaling, then mask, then mean over valid positions.
+    kl_per_pos = kl_per_pos * T_sq if isinstance(T_sq, torch.Tensor) else kl_per_pos * T_sq
+    kl_per_pos = kl_per_pos * valid_mask
+    kd_term = kl_per_pos.sum() / valid_mask.sum().clamp(min=1.0)
+
     # Hard target loss (CE against teacher's greedy tokens). decoder_mask is the
     # only correct mask: collate_fn zero-pads teacher_tokens, but pad_id from the
     # fairseq dict is typically 1 (not 0), so ignore_index=pad_id would mask
@@ -75,10 +88,65 @@ def kd_loss(student_logits, teacher_logits, teacher_tokens, decoder_mask,
         teacher_tokens.reshape(-1),
         reduction='none',
     ).reshape(student_logits.shape[:2])
-    ce_valid = (~decoder_mask).float()
-    ce = (ce_per_pos * ce_valid).sum() / ce_valid.sum().clamp(min=1.0)
-    
+    ce = (ce_per_pos * valid_mask).sum() / valid_mask.sum().clamp(min=1.0)
+
     return alpha * kd_term + (1 - alpha) * ce, kd_term.item(), ce.item()
+
+
+# ----- Viseme-conditioned learned temperatures -----
+
+# Viseme bucketing matches Sebastian's analysis notebook exactly so our
+# learned per-viseme temperatures line up with his fixed-temperature ablation.
+# 14 categories with split vowels, plus 'other' for words not in CMUdict.
+VISEME_LIST = [
+    'bilabial', 'labiodental', 'dental', 'alveolar', 'postalveolar',
+    'velar', 'glottal', 'approximant',
+    'front_unrounded', 'open', 'rounded', 'diphthong', 'rhotic_vowel',
+    'other',
+]
+N_VISEMES = len(VISEME_LIST)
+VISEME_TO_IDX = {v: i for i, v in enumerate(VISEME_LIST)}
+
+_PHONEME_TO_VISEME = {
+    'B': 'bilabial', 'P': 'bilabial', 'M': 'bilabial',
+    'F': 'labiodental', 'V': 'labiodental',
+    'TH': 'dental', 'DH': 'dental',
+    'T': 'alveolar', 'D': 'alveolar', 'N': 'alveolar',
+    'S': 'alveolar', 'Z': 'alveolar', 'L': 'alveolar',
+    'SH': 'postalveolar', 'ZH': 'postalveolar',
+    'CH': 'postalveolar', 'JH': 'postalveolar',
+    'K': 'velar', 'G': 'velar', 'NG': 'velar',
+    'HH': 'glottal',
+    'R': 'approximant', 'W': 'approximant', 'Y': 'approximant',
+    'IY': 'front_unrounded', 'IH': 'front_unrounded', 'EH': 'front_unrounded',
+    'EY': 'front_unrounded', 'AE': 'front_unrounded',
+    'AA': 'open', 'AH': 'open', 'AO': 'open',
+    'OW': 'rounded', 'UH': 'rounded', 'UW': 'rounded',
+    'AW': 'diphthong', 'AY': 'diphthong', 'OY': 'diphthong',
+    'ER': 'rhotic_vowel',
+}
+
+
+def initial_viseme_idx(word, cmu):
+    """Return viseme index for a word's first phoneme. Falls back to 'other'."""
+    word = word.lower().strip()
+    pron = cmu.get(word)
+    if not pron:
+        return VISEME_TO_IDX['other']
+    first = pron[0][0]
+    first = ''.join(c for c in first if not c.isdigit())
+    return VISEME_TO_IDX.get(_PHONEME_TO_VISEME.get(first, 'other'),
+                              VISEME_TO_IDX['other'])
+
+
+def build_word_viseme_table(target_words_iter, cmu):
+    """Map each unique target word to a viseme index. Returns a dict."""
+    table = {}
+    for w in target_words_iter:
+        if w in table:
+            continue
+        table[w] = initial_viseme_idx(w, cmu)
+    return table
 
 
 def shift_right_for_teacher_forcing(tokens, bos_id, pad_id):
@@ -140,6 +208,12 @@ def main():
                     help='Stop if val_kl does not improve for this many epochs.')
     ap.add_argument('--early_stopping_min_delta', type=float, default=1e-3,
                     help='Minimum val_kl improvement to count as a real improvement.')
+    ap.add_argument('--learned_viseme_temp', action='store_true',
+                    help='Learn one temperature per viseme category (10 params) '
+                         'instead of using a single fixed temperature. Each clip\'s '
+                         'target word maps to a viseme via CMUdict; the corresponding '
+                         'log-temperature parameter scales that clip\'s KD loss. '
+                         'Initialised so all temperatures equal --temperature.')
     args = ap.parse_args()
     
     os.makedirs(args.out_dir, exist_ok=True)
@@ -185,8 +259,42 @@ def main():
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Student: {n_params:.1f}M params")
     
+    # Learnable viseme temperatures (the project's novel contribution).
+    # Each viseme category gets one log-temperature scalar; learned jointly
+    # with the model. Initialised so exp(log_temps[i]) == args.temperature for
+    # all i, matching the uniform-T baseline at step 0.
+    log_temps = None
+    word_to_viseme = None
+    if args.learned_viseme_temp:
+        try:
+            import cmudict
+        except ImportError:
+            raise SystemExit("--learned_viseme_temp requires `pip install cmudict`")
+        cmu = cmudict.dict()
+        # Pre-compute word -> viseme for every target word in train + val so
+        # we never look up CMUdict in the hot loop.
+        word_to_viseme = build_word_viseme_table(
+            (w for ds in (train_set, val_set) for w in
+             (cid.split('_')[0] for cid in ds.clip_ids)),
+            cmu,
+        )
+        log_temps = torch.nn.Parameter(
+            torch.full((N_VISEMES,), math.log(args.temperature),
+                       device=device, dtype=torch.float32),
+        )
+        # Print the initial mapping summary
+        from collections import Counter
+        viseme_counts = Counter(word_to_viseme.values())
+        print(f"  learnable viseme temps: {N_VISEMES} categories")
+        for i, name in enumerate(VISEME_LIST):
+            n = viseme_counts.get(i, 0)
+            print(f"    {i}={name:<14} ({n} unique target words)")
+
     # Optimizer + scheduler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
+    train_params = list(model.parameters())
+    if log_temps is not None:
+        train_params.append(log_temps)
+    optimizer = torch.optim.AdamW(train_params, lr=args.lr,
                                    weight_decay=args.weight_decay)
     total_steps = args.epochs * len(train_loader)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -210,10 +318,22 @@ def main():
             teacher_logits = batch['teacher_logits'].to(device, non_blocking=True)
             teacher_tokens = batch['teacher_tokens'].to(device, non_blocking=True)
             decoder_mask = batch['decoder_mask'].to(device, non_blocking=True)
-            
+
             prev_tokens = shift_right_for_teacher_forcing(
                 teacher_tokens, special['bos_id'], special['pad_id'])
-            
+
+            # Per-clip temperature: either uniform scalar, or per-clip tensor
+            # derived from each target word's viseme category and the learnable
+            # log_temps parameter.
+            if log_temps is not None:
+                viseme_idx = torch.tensor(
+                    [word_to_viseme[w] for w in batch['target_words']],
+                    device=device, dtype=torch.long,
+                )  # (B,)
+                clip_temp = torch.exp(log_temps[viseme_idx])  # (B,) — gradient flows through log_temps
+            else:
+                clip_temp = args.temperature
+
             optimizer.zero_grad()
             with torch.cuda.amp.autocast(dtype=torch.float16):
                 student_logits = model(video, video_mask, prev_tokens,
@@ -221,13 +341,13 @@ def main():
                 loss, kd_val, ce_val = kd_loss(
                     student_logits.float(), teacher_logits, teacher_tokens,
                     decoder_mask,
-                    temperature=args.temperature, alpha=args.alpha,
+                    temperature=clip_temp, alpha=args.alpha,
                     pad_id=special['pad_id'],
                 )
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(train_params, 1.0)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
@@ -253,6 +373,15 @@ def main():
               f"val_kl(T={args.temperature})={val_kl:.3f} "
               f"time={elapsed:.0f}s")
         
+        # If we're learning per-viseme temperatures, log them every epoch so we
+        # can see how the model is choosing to soften per category over time.
+        if log_temps is not None:
+            with torch.no_grad():
+                temps = torch.exp(log_temps).detach().cpu().tolist()
+            print("  learned T per viseme:")
+            for i, name in enumerate(VISEME_LIST):
+                print(f"    T[{name:<14}] = {temps[i]:.3f}")
+
         # Save checkpoint
         ckpt = {
             'epoch': epoch + 1,
@@ -261,6 +390,10 @@ def main():
             'val_kl': val_kl,
             'args': vars(args),
         }
+        if log_temps is not None:
+            ckpt['log_temps'] = log_temps.detach().cpu()
+            ckpt['viseme_list'] = VISEME_LIST
+            ckpt['word_to_viseme'] = word_to_viseme
         torch.save(ckpt, os.path.join(args.out_dir, 'last.pt'))
         if val_kl < best_val_kl - args.early_stopping_min_delta:
             best_val_kl = val_kl
