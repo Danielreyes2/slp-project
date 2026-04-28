@@ -9,20 +9,22 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-AVHUBERT_DIR = (Path(__file__).parent / "../av_hubert/avhubert").resolve()
+AVHUBERT_PARENT = (Path(__file__).parent / "../av_hubert").resolve()
 FAIRSEQ_PATH = (Path(__file__).parent / "../av_hubert/fairseq").resolve()
-# Match sanity.py exactly: only AVHUBERT_DIR and FAIRSEQ_PATH on sys.path,
-# bare imports. Adding the parent /av_hubert/ AND the inner /av_hubert/avhubert/
-# both to sys.path makes Python import hubert_pretraining twice (once as
-# `avhubert.hubert_pretraining` via the package, once as bare top-level), and
-# the second registration trips fairseq's `Cannot register duplicate model`.
-sys.path.insert(0, str(AVHUBERT_DIR))
+# DO NOT add /av_hubert/avhubert to sys.path. The avhubert sources have
+# try/except blocks (bare-then-relative imports). With the inner dir on path,
+# bare imports succeed and the modules load as TOP-LEVEL, while `from avhubert
+# import ...` ALSO loads them as `avhubert.X` — fairseq's `register_model` then
+# trips with `Cannot register duplicate model (av_hubert)`. With only
+# AVHUBERT_PARENT on path, the bare imports fail, fall to relative imports,
+# and the modules load only via the package (single registration).
+sys.path.insert(0, str(AVHUBERT_PARENT))
 sys.path.insert(0, str(FAIRSEQ_PATH))
 
 import fairseq  # type: ignore
-import hubert_pretraining  # type: ignore  # noqa
-import hubert  # type: ignore  # noqa
-import hubert_asr  # type: ignore  # noqa
+from avhubert import hubert_pretraining  # type: ignore  # noqa
+from avhubert import hubert  # type: ignore  # noqa
+from avhubert import hubert_asr  # type: ignore  # noqa
 
 from student_dataset import (
     LRWDistillationDataset, collate_fn, split_clip_ids_by_lrw_split,

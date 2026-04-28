@@ -10,16 +10,17 @@ from tqdm import tqdm
 from python_speech_features import logfbank
 
 # Path setup for AV-HuBERT
-AVHUBERT_DIR = (Path(__file__).parent / "../av_hubert/avhubert").resolve()
+AVHUBERT_PARENT = (Path(__file__).parent / "../av_hubert").resolve()
 FAIRSEQ_PATH = (Path(__file__).parent / "../av_hubert/fairseq").resolve()
-# Match sanity.py exactly — bare imports, only the inner avhubert dir on path.
-sys.path.insert(0, str(AVHUBERT_DIR))
+# Only AVHUBERT_PARENT on path; package-style imports below. Inner avhubert
+# dir on sys.path triggers fairseq duplicate-model registration.
+sys.path.insert(0, str(AVHUBERT_PARENT))
 sys.path.insert(0, str(FAIRSEQ_PATH))
 
 import fairseq  # type: ignore
-import hubert_pretraining  # type: ignore  # noqa
-import hubert  # type: ignore  # noqa
-import hubert_asr  # type: ignore  # noqa
+from avhubert import hubert_pretraining  # type: ignore  # noqa
+from avhubert import hubert  # type: ignore  # noqa
+from avhubert import hubert_asr  # type: ignore  # noqa
 
 
 # ----- Audio preprocessing (replicates AV-HuBERT's hubert_dataset transforms) -----
